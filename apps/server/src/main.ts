@@ -41,6 +41,16 @@ import { Autumn } from 'autumn-js';
 import { appRouter } from './trpc';
 import { cors } from 'hono/cors';
 import { Hono } from 'hono';
+// Security imports
+import {
+  createSecurityMiddleware,
+  createRateLimitMiddleware,
+  handleCSPViolation,
+  RATE_LIMITS,
+  SecurityUtils,
+} from './lib/security';
+import { securityRouter } from './routes/security';
+import { getConnInfo } from 'hono/cloudflare-workers';
 
 export class DbRpcDO extends RpcTarget {
   constructor(
@@ -535,6 +545,7 @@ export default class extends WorkerEntrypoint<typeof env> {
     .route('/ai', aiRouter)
     .route('/autumn', autumnApi)
     .route('/public', publicRouter)
+    .route('/security', securityRouter)
     .on(['GET', 'POST', 'OPTIONS'], '/auth/*', (c) => {
       return c.var.auth.handler(c.req.raw);
     })
@@ -564,6 +575,44 @@ export default class extends WorkerEntrypoint<typeof env> {
     });
 
   private app = new Hono<HonoContext>()
+    // Security middleware - applied first
+    .use(
+      '*',
+      createSecurityMiddleware({
+        enableCSP: true,
+        enableHSTS: true,
+        enableFrameOptions: true,
+        enableContentTypeOptions: true,
+        enableReferrerPolicy: true,
+        enablePermissionsPolicy: true,
+        isDevelopment: env.NODE_ENV === 'development',
+      })
+    )
+    // Rate limiting for security endpoints
+    .use(
+      '/auth/*',
+      createRateLimitMiddleware(
+        RATE_LIMITS.AUTH.LOGIN,
+        (c) => `auth:${getConnInfo(c).remote.address || 'unknown'}`
+      )
+    )
+    // IP blocking middleware
+    .use('*', function(c, next) {
+      const ip = getConnInfo(c).remote.address || 'unknown';
+      const userAgent = c.req.header('User-Agent') || '';
+      
+      // Basic suspicious activity detection
+      const suspiciousActivity = SecurityUtils.detectSuspiciousActivity(userAgent, ip);
+      
+      if (suspiciousActivity.isSuspicious) {
+        console.warn(`Suspicious activity detected from IP ${ip}:`, suspiciousActivity.reasons);
+        
+        // For now, just log - in production you might want to block
+        // You can implement IP blocking logic here
+      }
+      
+      return next();
+    })
     .use(
       '*',
       cors({
@@ -575,10 +624,12 @@ export default class extends WorkerEntrypoint<typeof env> {
           }
         },
         credentials: true,
-        allowHeaders: ['Content-Type', 'Authorization'],
-        exposeHeaders: ['X-Zero-Redirect'],
+        allowHeaders: ['Content-Type', 'Authorization', 'X-Forwarded-For'],
+        exposeHeaders: ['X-Zero-Redirect', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
       }),
     )
+    // CSP violation reporting endpoint
+    .post('/api/security/csp-report', handleCSPViolation)
     .get('.well-known/oauth-authorization-server', async (c) => {
       const auth = createAuth();
       return oAuthDiscoveryMetadata(auth)(c.req.raw);
@@ -633,28 +684,54 @@ export default class extends WorkerEntrypoint<typeof env> {
     )
     .get('/health', (c) => c.json({ message: 'Zero Server is Up!' }))
     .get('/', (c) => c.redirect(`${env.VITE_PUBLIC_APP_URL}`))
-    .post('/a8n/notify/:providerId', async (c) => {
-      if (!c.req.header('Authorization')) return c.json({ error: 'Unauthorized' }, { status: 401 });
-      const providerId = c.req.param('providerId');
-      if (providerId === EProviders.google) {
-        const body = await c.req.json<{ historyId: string }>();
-        const subHeader = c.req.header('x-goog-pubsub-subscription-name');
-        const isValid = await verifyToken(c.req.header('Authorization')!.split(' ')[1]);
-        if (!isValid) {
-          console.log('[GOOGLE] invalid request', body);
-          return c.json({}, { status: 200 });
+    .post('/a8n/notify/:providerId', 
+      createRateLimitMiddleware(
+        RATE_LIMITS.API.GENERAL,
+        (c) => `webhook:${c.req.param('providerId')}:${getConnInfo(c).remote.address || 'unknown'}`
+      ),
+      async (c) => {
+        const authHeader = c.req.header('Authorization');
+        if (!authHeader) {
+          console.warn(`Webhook attempt without authorization from IP: ${getConnInfo(c).remote.address}`);
+          return c.json({ error: 'Unauthorized' }, { status: 401 });
         }
-        const instance = await env.MAIN_WORKFLOW.create({
-          params: {
-            providerId,
-            historyId: body.historyId,
-            subscriptionName: subHeader,
-          },
-        });
-        console.log('[GOOGLE] created instance', instance.id, instance.status);
-        return c.json({ message: 'OK' }, { status: 200 });
+        
+        const providerId = c.req.param('providerId');
+        if (providerId === EProviders.google) {
+          try {
+            const body = await c.req.json<{ historyId: string }>();
+            const subHeader = c.req.header('x-goog-pubsub-subscription-name');
+            const token = authHeader.split(' ')[1];
+            
+            if (!token) {
+              console.warn(`Invalid authorization format from IP: ${getConnInfo(c).remote.address}`);
+              return c.json({ error: 'Invalid authorization format' }, { status: 401 });
+            }
+            
+            const isValid = await verifyToken(token);
+            if (!isValid) {
+              console.warn(`Invalid webhook token from IP: ${getConnInfo(c).remote.address}`, { body });
+              return c.json({}, { status: 200 });
+            }
+            
+            const instance = await env.MAIN_WORKFLOW.create({
+              params: {
+                providerId,
+                historyId: body.historyId,
+                subscriptionName: subHeader,
+              },
+            });
+            console.log('[GOOGLE] created instance', instance.id, instance.status);
+            return c.json({ message: 'OK' }, { status: 200 });
+          } catch (error) {
+            console.error('Error processing webhook:', error);
+            return c.json({ error: 'Internal Server Error' }, { status: 500 });
+          }
+        }
+        
+        return c.json({ error: 'Unsupported provider' }, { status: 400 });
       }
-    });
+    );
 
   async fetch(request: Request): Promise<Response> {
     if (request.url.includes('/zero/durable-mailbox')) {
