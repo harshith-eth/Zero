@@ -4,6 +4,14 @@ import {
   type EmailMatrix,
   type WritingStyleMatrix,
 } from './services/writing-style-service';
+// Security imports
+import {
+  createSecurityMiddleware,
+  createRateLimitMiddleware,
+  handleCSPViolation,
+  RATE_LIMITS,
+  SecurityUtils,
+} from './lib/security';
 import {
   account,
   connection,
@@ -20,9 +28,11 @@ import { MainWorkflow, ThreadWorkflow, ZeroWorkflow } from './pipelines';
 import { oAuthDiscoveryMetadata } from 'better-auth/plugins';
 import { EProviders, type ISubscribeBatch } from './types';
 import { eq, and, desc, asc, inArray } from 'drizzle-orm';
+import { getConnInfo } from 'hono/cloudflare-workers';
 import { contextStorage } from 'hono/context-storage';
 import { defaultUserSettings } from './lib/schemas';
 import { createLocalJWKSet, jwtVerify } from 'jose';
+import { securityRouter } from './routes/security';
 import { routePartykitRequest } from 'partyserver';
 import { withMcpAuth } from 'better-auth/plugins';
 import { enableBrainFunction } from './lib/brain';
@@ -41,16 +51,6 @@ import { Autumn } from 'autumn-js';
 import { appRouter } from './trpc';
 import { cors } from 'hono/cors';
 import { Hono } from 'hono';
-// Security imports
-import {
-  createSecurityMiddleware,
-  createRateLimitMiddleware,
-  handleCSPViolation,
-  RATE_LIMITS,
-  SecurityUtils,
-} from './lib/security';
-import { securityRouter } from './routes/security';
-import { getConnInfo } from 'hono/cloudflare-workers';
 
 export class DbRpcDO extends RpcTarget {
   constructor(
@@ -586,31 +586,31 @@ export default class extends WorkerEntrypoint<typeof env> {
         enableReferrerPolicy: true,
         enablePermissionsPolicy: true,
         isDevelopment: env.NODE_ENV === 'development',
-      })
+      }),
     )
     // Rate limiting for security endpoints
     .use(
       '/auth/*',
       createRateLimitMiddleware(
         RATE_LIMITS.AUTH.LOGIN,
-        (c) => `auth:${getConnInfo(c).remote.address || 'unknown'}`
-      )
+        (c) => `auth:${getConnInfo(c).remote.address || 'unknown'}`,
+      ),
     )
     // IP blocking middleware
-    .use('*', function(c, next) {
+    .use('*', function (c, next) {
       const ip = getConnInfo(c).remote.address || 'unknown';
       const userAgent = c.req.header('User-Agent') || '';
-      
+
       // Basic suspicious activity detection
       const suspiciousActivity = SecurityUtils.detectSuspiciousActivity(userAgent, ip);
-      
+
       if (suspiciousActivity.isSuspicious) {
         console.warn(`Suspicious activity detected from IP ${ip}:`, suspiciousActivity.reasons);
-        
+
         // For now, just log - in production you might want to block
         // You can implement IP blocking logic here
       }
-      
+
       return next();
     })
     .use(
@@ -625,7 +625,12 @@ export default class extends WorkerEntrypoint<typeof env> {
         },
         credentials: true,
         allowHeaders: ['Content-Type', 'Authorization', 'X-Forwarded-For'],
-        exposeHeaders: ['X-Zero-Redirect', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+        exposeHeaders: [
+          'X-Zero-Redirect',
+          'X-RateLimit-Limit',
+          'X-RateLimit-Remaining',
+          'X-RateLimit-Reset',
+        ],
       }),
     )
     // CSP violation reporting endpoint
@@ -684,36 +689,43 @@ export default class extends WorkerEntrypoint<typeof env> {
     )
     .get('/health', (c) => c.json({ message: 'Zero Server is Up!' }))
     .get('/', (c) => c.redirect(`${env.VITE_PUBLIC_APP_URL}`))
-    .post('/a8n/notify/:providerId', 
+    .post(
+      '/a8n/notify/:providerId',
       createRateLimitMiddleware(
         RATE_LIMITS.API.GENERAL,
-        (c) => `webhook:${c.req.param('providerId')}:${getConnInfo(c).remote.address || 'unknown'}`
+        (c) => `webhook:${c.req.param('providerId')}:${getConnInfo(c).remote.address || 'unknown'}`,
       ),
       async (c) => {
         const authHeader = c.req.header('Authorization');
         if (!authHeader) {
-          console.warn(`Webhook attempt without authorization from IP: ${getConnInfo(c).remote.address}`);
+          console.warn(
+            `Webhook attempt without authorization from IP: ${getConnInfo(c).remote.address}`,
+          );
           return c.json({ error: 'Unauthorized' }, { status: 401 });
         }
-        
+
         const providerId = c.req.param('providerId');
         if (providerId === EProviders.google) {
           try {
             const body = await c.req.json<{ historyId: string }>();
             const subHeader = c.req.header('x-goog-pubsub-subscription-name');
             const token = authHeader.split(' ')[1];
-            
+
             if (!token) {
-              console.warn(`Invalid authorization format from IP: ${getConnInfo(c).remote.address}`);
+              console.warn(
+                `Invalid authorization format from IP: ${getConnInfo(c).remote.address}`,
+              );
               return c.json({ error: 'Invalid authorization format' }, { status: 401 });
             }
-            
+
             const isValid = await verifyToken(token);
             if (!isValid) {
-              console.warn(`Invalid webhook token from IP: ${getConnInfo(c).remote.address}`, { body });
+              console.warn(`Invalid webhook token from IP: ${getConnInfo(c).remote.address}`, {
+                body,
+              });
               return c.json({}, { status: 200 });
             }
-            
+
             const instance = await env.MAIN_WORKFLOW.create({
               params: {
                 providerId,
@@ -728,9 +740,9 @@ export default class extends WorkerEntrypoint<typeof env> {
             return c.json({ error: 'Internal Server Error' }, { status: 500 });
           }
         }
-        
+
         return c.json({ error: 'Unsupported provider' }, { status: 400 });
-      }
+      },
     );
 
   async fetch(request: Request): Promise<Response> {

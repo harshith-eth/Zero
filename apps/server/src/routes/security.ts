@@ -1,15 +1,15 @@
-import { Hono } from 'hono';
-import { 
-  createRateLimitMiddleware, 
+import {
+  createRateLimitMiddleware,
   RATE_LIMITS,
   SecurityUtils,
   createInputValidationMiddleware,
-  INPUT_SCHEMAS
+  INPUT_SCHEMAS,
 } from '../lib/security';
 import { EmailSecurityService, createImageProxyHandler } from '../lib/security/email-security';
-import { redis } from '../lib/services';
 import { getConnInfo } from 'hono/cloudflare-workers';
 import type { HonoContext } from '../ctx';
+import { redis } from '../lib/services';
+import { Hono } from 'hono';
 import { z } from 'zod';
 
 const securityRouter = new Hono<HonoContext>();
@@ -19,10 +19,11 @@ const securityRouter = new Hono<HonoContext>();
 /**
  * Security dashboard - Overview of security metrics
  */
-securityRouter.get('/dashboard',
+securityRouter.get(
+  '/dashboard',
   createRateLimitMiddleware(
     RATE_LIMITS.API.GENERAL,
-    (c) => `security:dashboard:${c.var.sessionUser?.id || 'anonymous'}`
+    (c) => `security:dashboard:${c.var.sessionUser?.id || 'anonymous'}`,
   ),
   async (c) => {
     const sessionUser = c.var.sessionUser;
@@ -33,8 +34,8 @@ securityRouter.get('/dashboard',
     try {
       const cache = redis();
       const now = Date.now();
-      const last24h = now - (24 * 60 * 60 * 1000);
-      const last7d = now - (7 * 24 * 60 * 60 * 1000);
+      const last24h = now - 24 * 60 * 60 * 1000;
+      const last7d = now - 7 * 24 * 60 * 60 * 1000;
 
       // Get security metrics
       const metrics = {
@@ -60,28 +61,29 @@ securityRouter.get('/dashboard',
           loginTrend: await getMetricTrend(cache, 'auth:login_attempts', last7d),
           securityTrend: await getMetricTrend(cache, 'security:events', last7d),
           threatTrend: await getMetricTrend(cache, 'email:threats', last7d),
-        }
+        },
       };
 
       return c.json({
         success: true,
         metrics,
-        timestamp: now
+        timestamp: now,
       });
     } catch (error) {
       console.error('Error generating security dashboard:', error);
       return c.json({ error: 'Internal server error' }, 500);
     }
-  }
+  },
 );
 
 /**
  * Security events log
  */
-securityRouter.get('/events',
+securityRouter.get(
+  '/events',
   createRateLimitMiddleware(
     RATE_LIMITS.API.GENERAL,
-    (c) => `security:events:${c.var.sessionUser?.id || 'anonymous'}`
+    (c) => `security:events:${c.var.sessionUser?.id || 'anonymous'}`,
   ),
   async (c) => {
     const sessionUser = c.var.sessionUser;
@@ -93,11 +95,13 @@ securityRouter.get('/events',
       const limit = parseInt(c.req.query('limit') || '100');
       const offset = parseInt(c.req.query('offset') || '0');
       const eventType = c.req.query('type');
-      const since = c.req.query('since') ? new Date(c.req.query('since')!) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const since = c.req.query('since')
+        ? new Date(c.req.query('since')!)
+        : new Date(Date.now() - 24 * 60 * 60 * 1000);
 
       const cache = redis();
       const pattern = `security:events:*`;
-      
+
       // Get security events (simplified implementation)
       const keys = await cache.keys(pattern);
       const events = [];
@@ -107,7 +111,7 @@ securityRouter.get('/events',
         if (eventData) {
           const event = JSON.parse(eventData as string);
           const eventDate = new Date(event.timestamp);
-          
+
           if (eventDate >= since && (!eventType || event.event === eventType)) {
             events.push(event);
           }
@@ -123,23 +127,24 @@ securityRouter.get('/events',
         pagination: {
           limit,
           offset,
-          total: keys.length
-        }
+          total: keys.length,
+        },
       });
     } catch (error) {
       console.error('Error fetching security events:', error);
       return c.json({ error: 'Internal server error' }, 500);
     }
-  }
+  },
 );
 
 /**
  * Email security scan endpoint
  */
-securityRouter.post('/scan-email',
+securityRouter.post(
+  '/scan-email',
   createRateLimitMiddleware(
     RATE_LIMITS.API.UPLOAD,
-    (c) => `security:scan:${c.var.sessionUser?.id || 'anonymous'}`
+    (c) => `security:scan:${c.var.sessionUser?.id || 'anonymous'}`,
   ),
   createInputValidationMiddleware(
     z.object({
@@ -148,12 +153,16 @@ securityRouter.post('/scan-email',
       subject: INPUT_SCHEMAS.subject,
       htmlContent: z.string().max(10 * 1024 * 1024), // 10MB limit
       headers: z.record(z.string()).optional(),
-      attachments: z.array(z.object({
-        filename: INPUT_SCHEMAS.fileName,
-        contentType: z.string(),
-        size: z.number().max(25 * 1024 * 1024), // 25MB limit
-      })).optional(),
-    })
+      attachments: z
+        .array(
+          z.object({
+            filename: INPUT_SCHEMAS.fileName,
+            contentType: z.string(),
+            size: z.number().max(25 * 1024 * 1024), // 25MB limit
+          }),
+        )
+        .optional(),
+    }),
   ),
   async (c) => {
     const sessionUser = c.var.sessionUser;
@@ -163,10 +172,10 @@ securityRouter.post('/scan-email',
 
     try {
       const emailData = c.var.validatedData;
-      
+
       // Generate comprehensive security report
       const securityReport = EmailSecurityService.generateEmailSecurityReport(emailData);
-      
+
       // Log the scan
       const cache = redis();
       await logSecurityEvent(cache, 'email_security_scan', {
@@ -179,29 +188,30 @@ securityRouter.post('/scan-email',
 
       // Update metrics
       await incrementMetric(cache, 'email:scanned');
-      
+
       if (securityReport.overallRisk === 'high') {
         await incrementMetric(cache, 'email:threats_blocked');
       }
 
       return c.json({
         success: true,
-        report: securityReport
+        report: securityReport,
       });
     } catch (error) {
       console.error('Error scanning email:', error);
       return c.json({ error: 'Internal server error' }, 500);
     }
-  }
+  },
 );
 
 /**
  * Security audit endpoint
  */
-securityRouter.post('/audit',
+securityRouter.post(
+  '/audit',
   createRateLimitMiddleware(
     RATE_LIMITS.SECURITY.SETTINGS_CHANGE,
-    (c) => `security:audit:${c.var.sessionUser?.id || 'anonymous'}`
+    (c) => `security:audit:${c.var.sessionUser?.id || 'anonymous'}`,
   ),
   async (c) => {
     const sessionUser = c.var.sessionUser;
@@ -211,7 +221,7 @@ securityRouter.post('/audit',
 
     try {
       const auditResults = await performSecurityAudit();
-      
+
       // Log audit
       const cache = redis();
       await logSecurityEvent(cache, 'security_audit', {
@@ -222,22 +232,23 @@ securityRouter.post('/audit',
 
       return c.json({
         success: true,
-        audit: auditResults
+        audit: auditResults,
       });
     } catch (error) {
       console.error('Error performing security audit:', error);
       return c.json({ error: 'Internal server error' }, 500);
     }
-  }
+  },
 );
 
 /**
  * Security headers check
  */
-securityRouter.get('/headers-check',
+securityRouter.get(
+  '/headers-check',
   createRateLimitMiddleware(
     RATE_LIMITS.API.GENERAL,
-    (c) => `security:headers:${c.var.sessionUser?.id || 'anonymous'}`
+    (c) => `security:headers:${c.var.sessionUser?.id || 'anonymous'}`,
   ),
   async (c) => {
     const sessionUser = c.var.sessionUser;
@@ -253,20 +264,20 @@ securityRouter.get('/headers-check',
     try {
       const response = await fetch(url, { method: 'HEAD' });
       const headers = Object.fromEntries(response.headers.entries());
-      
+
       const securityAnalysis = analyzeSecurityHeaders(headers);
-      
+
       return c.json({
         success: true,
         url,
         headers,
-        analysis: securityAnalysis
+        analysis: securityAnalysis,
       });
     } catch (error) {
       console.error('Error checking security headers:', error);
       return c.json({ error: 'Failed to check headers' }, 500);
     }
-  }
+  },
 );
 
 /**
@@ -280,7 +291,7 @@ securityRouter.get('/image-proxy', createImageProxyHandler());
 securityRouter.post('/csp-report', async (c) => {
   try {
     const report = await c.req.json();
-    
+
     // Log CSP violation
     const cache = redis();
     await logSecurityEvent(cache, 'csp_violation', {
@@ -291,13 +302,13 @@ securityRouter.post('/csp-report', async (c) => {
     });
 
     await incrementMetric(cache, 'security:csp_violations');
-    
+
     // Check for critical violations
     if (report['violated-directive'] && report['violated-directive'].indexOf('script-src') !== -1) {
       console.warn('Critical CSP violation detected:', report);
       await incrementMetric(cache, 'security:critical_violations');
     }
-    
+
     return c.json({ status: 'ok' }, 204);
   } catch (error) {
     console.error('Error handling CSP violation report:', error);
@@ -308,10 +319,11 @@ securityRouter.post('/csp-report', async (c) => {
 /**
  * Security metrics endpoint
  */
-securityRouter.get('/metrics',
+securityRouter.get(
+  '/metrics',
   createRateLimitMiddleware(
     RATE_LIMITS.API.GENERAL,
-    (c) => `security:metrics:${c.var.sessionUser?.id || 'anonymous'}`
+    (c) => `security:metrics:${c.var.sessionUser?.id || 'anonymous'}`,
   ),
   async (c) => {
     const sessionUser = c.var.sessionUser;
@@ -322,7 +334,7 @@ securityRouter.get('/metrics',
     try {
       const cache = redis();
       const timeRange = c.req.query('range') || '24h';
-      
+
       let timeWindow: number;
       switch (timeRange) {
         case '1h':
@@ -342,12 +354,16 @@ securityRouter.get('/metrics',
       }
 
       const since = Date.now() - timeWindow;
-      
+
       const metrics = {
         security: {
           totalThreatsBlocked: await getMetricCount(cache, 'security:threats_blocked', since),
           rateLimitViolations: await getMetricCount(cache, 'security:rate_limit_hits', since),
-          suspiciousActivities: await getMetricCount(cache, 'security:suspicious_activities', since),
+          suspiciousActivities: await getMetricCount(
+            cache,
+            'security:suspicious_activities',
+            since,
+          ),
           cspViolations: await getMetricCount(cache, 'security:csp_violations', since),
         },
         authentication: {
@@ -359,20 +375,20 @@ securityRouter.get('/metrics',
           emailsProcessed: await getMetricCount(cache, 'email:processed', since),
           maliciousEmailsBlocked: await getMetricCount(cache, 'email:malicious_blocked', since),
           attachmentsScanned: await getMetricCount(cache, 'email:attachments_scanned', since),
-        }
+        },
       };
 
       return c.json({
         success: true,
         metrics,
         timeRange,
-        generatedAt: new Date().toISOString()
+        generatedAt: new Date().toISOString(),
       });
     } catch (error) {
       console.error('Error fetching security metrics:', error);
       return c.json({ error: 'Internal server error' }, 500);
     }
-  }
+  },
 );
 
 // Helper functions
@@ -381,15 +397,15 @@ async function getMetricCount(cache: any, metric: string, since: number): Promis
   try {
     const keys = await cache.keys(`${metric}:*`);
     let count = 0;
-    
+
     for (const key of keys) {
       const timestamp = parseInt(key.split(':').pop() || '0');
       if (timestamp >= since) {
         const value = await cache.get(key);
-        count += parseInt(value as string || '0');
+        count += parseInt((value as string) || '0');
       }
     }
-    
+
     return count;
   } catch (error) {
     console.error(`Error getting metric count for ${metric}:`, error);
@@ -397,22 +413,26 @@ async function getMetricCount(cache: any, metric: string, since: number): Promis
   }
 }
 
-async function getMetricTrend(cache: any, metric: string, since: number): Promise<Array<{ timestamp: number; count: number }>> {
+async function getMetricTrend(
+  cache: any,
+  metric: string,
+  since: number,
+): Promise<Array<{ timestamp: number; count: number }>> {
   try {
     const keys = await cache.keys(`${metric}:*`);
     const trend = [];
-    
+
     for (const key of keys) {
       const timestamp = parseInt(key.split(':').pop() || '0');
       if (timestamp >= since) {
         const value = await cache.get(key);
         trend.push({
           timestamp,
-          count: parseInt(value as string || '0')
+          count: parseInt((value as string) || '0'),
         });
       }
     }
-    
+
     return trend.sort((a, b) => a.timestamp - b.timestamp);
   } catch (error) {
     console.error(`Error getting metric trend for ${metric}:`, error);
@@ -420,7 +440,11 @@ async function getMetricTrend(cache: any, metric: string, since: number): Promis
   }
 }
 
-async function logSecurityEvent(cache: any, event: string, data: Record<string, any>): Promise<void> {
+async function logSecurityEvent(
+  cache: any,
+  event: string,
+  data: Record<string, any>,
+): Promise<void> {
   try {
     const key = `security:events:${Date.now()}:${Math.random().toString(36).substr(2, 9)}`;
     const eventData = {
@@ -428,7 +452,7 @@ async function logSecurityEvent(cache: any, event: string, data: Record<string, 
       data,
       timestamp: new Date().toISOString(),
     };
-    
+
     await cache.setex(key, 30 * 24 * 60 * 60, JSON.stringify(eventData)); // 30 days
   } catch (error) {
     console.error('Error logging security event:', error);
@@ -451,7 +475,7 @@ async function performSecurityAudit(): Promise<any> {
     passed: 0,
     failed: 0,
     warnings: 0,
-    checks: []
+    checks: [],
   };
 
   const checks = [
@@ -461,7 +485,7 @@ async function performSecurityAudit(): Promise<any> {
       check: async () => {
         // This would check if security headers are properly configured
         return { status: 'pass', message: 'Security headers properly configured' };
-      }
+      },
     },
     {
       name: 'Rate Limiting',
@@ -469,7 +493,7 @@ async function performSecurityAudit(): Promise<any> {
       check: async () => {
         // This would check if rate limiting is working
         return { status: 'pass', message: 'Rate limiting is active' };
-      }
+      },
     },
     {
       name: 'Input Validation',
@@ -477,7 +501,7 @@ async function performSecurityAudit(): Promise<any> {
       check: async () => {
         // This would verify input validation
         return { status: 'pass', message: 'Input validation is working' };
-      }
+      },
     },
     {
       name: 'Authentication Security',
@@ -485,7 +509,7 @@ async function performSecurityAudit(): Promise<any> {
       check: async () => {
         // This would check auth security
         return { status: 'pass', message: 'Authentication security is active' };
-      }
+      },
     },
     {
       name: 'Email Security',
@@ -493,8 +517,8 @@ async function performSecurityAudit(): Promise<any> {
       check: async () => {
         // This would verify email security
         return { status: 'pass', message: 'Email security is functioning' };
-      }
-    }
+      },
+    },
   ];
 
   for (const check of checks) {
@@ -503,9 +527,9 @@ async function performSecurityAudit(): Promise<any> {
       audit.checks.push({
         name: check.name,
         description: check.description,
-        ...result
+        ...result,
       });
-      
+
       if (result.status === 'pass') audit.passed++;
       else if (result.status === 'fail') audit.failed++;
       else audit.warnings++;
@@ -514,7 +538,7 @@ async function performSecurityAudit(): Promise<any> {
         name: check.name,
         description: check.description,
         status: 'fail',
-        message: `Check failed: ${error}`
+        message: `Check failed: ${error}`,
       });
       audit.failed++;
     }
@@ -528,45 +552,45 @@ function analyzeSecurityHeaders(headers: Record<string, string>): any {
     score: 0,
     maxScore: 100,
     recommendations: [],
-    headers: {}
+    headers: {},
   };
 
   const securityHeaders = [
     {
       name: 'Content-Security-Policy',
       weight: 20,
-      check: (value: string) => value && value.length > 10
+      check: (value: string) => value && value.length > 10,
     },
     {
       name: 'Strict-Transport-Security',
       weight: 15,
-      check: (value: string) => value && value.includes('max-age')
+      check: (value: string) => value && value.includes('max-age'),
     },
     {
       name: 'X-Frame-Options',
       weight: 15,
-      check: (value: string) => value && (value === 'DENY' || value === 'SAMEORIGIN')
+      check: (value: string) => value && (value === 'DENY' || value === 'SAMEORIGIN'),
     },
     {
       name: 'X-Content-Type-Options',
       weight: 10,
-      check: (value: string) => value === 'nosniff'
+      check: (value: string) => value === 'nosniff',
     },
     {
       name: 'Referrer-Policy',
       weight: 10,
-      check: (value: string) => value && value.length > 0
+      check: (value: string) => value && value.length > 0,
     },
     {
       name: 'Permissions-Policy',
       weight: 10,
-      check: (value: string) => value && value.length > 0
-    }
+      check: (value: string) => value && value.length > 0,
+    },
   ];
 
   for (const header of securityHeaders) {
     const value = headers[header.name.toLowerCase()] || headers[header.name];
-    
+
     if (value && header.check(value)) {
       analysis.score += header.weight;
       analysis.headers[header.name] = { present: true, value, secure: true };
